@@ -19,7 +19,8 @@ extern int snprintf(char *, unsigned long, const char *, ...);
 #define EARLY_US 3000                          // wake this long before the predicted frame
 #define HIST 32                                // frame times kept per camera
 struct st {
-  u8 *slot[MAXS]; int sw[MAXS], sh[MAXS], cam[MAXS], pend[MAXS]; u32 shash[MAXS]; int nslots;
+  u8 *slot[MAXS]; int sw[MAXS], sh[MAXS], cam[MAXS], pend[MAXS], sbpp[MAXS]; u32 shash[MAXS]; int nslots;
+  int pairs;                                   // 1: the darker frame of each pair is the short one (the Pico 4)
   u32 k[MAXC]; int m1[MAXC], m2[MAXC];         // per camera: frame counter, previous two means
   int nostrict[MAXC], nalt[MAXC];              // frames since the last strict short one, alternating ones since
   int thr;                                     // the dim pass's floor
@@ -49,23 +50,38 @@ void set_bufs(u8 *scratch, u16 *cells, int *lab, char *out, int thr) {
   S.scratch = scratch; S.cells = cells; S.lab = lab; S.out = out; S.head = S.tail = 0; S.thr = thr;
 }
 void reset_slots(void) { S.nslots = 0; }
-void add_slot(u8 *p, int w, int h, int cam) {
-  int i = S.nslots++; S.slot[i] = p; S.sw[i] = w; S.sh[i] = h; S.cam[i] = cam; S.pend[i] = 0;
+void set_pairs(int on) { S.pairs = on; }
+// bpp 1: 8-bit pixels (Quest); bpp 2: 16-bit little-endian words holding 10-bit pixels (the Pico 4's tracking cameras)
+void add_slot(u8 *p, int w, int h, int cam, int bpp) {
+  int i = S.nslots++; S.slot[i] = p; S.sw[i] = w; S.sh[i] = h; S.cam[i] = cam; S.pend[i] = 0; S.sbpp[i] = bpp == 2 ? 2 : 1;
 }
 u32 n_drop(void) { return S.ndrop; }
 u64 scan_ns(void) { return S.scan_ns; }
 u32 n_scan(void) { return S.nscan; }
 u32 n_poll(void) { return S.npoll; }
 static u32 hash(int i) {
-  const u8 *p = S.slot[i]; u32 n = (u32)(S.sw[i] * S.sh[i]), step = n / 61, h = 2166136261u;
+  const u8 *p = S.slot[i]; u32 n = (u32)(S.sw[i] * S.sh[i] * S.sbpp[i]), step = n / 61, h = 2166136261u;
   for (u32 o = step / 2; o < n; o += step) { h ^= p[o]; h *= 16777619u; }
   return h;
 }
 void prime(void) { for (int i = 0; i < S.nslots; i++) S.shash[i] = hash(i); }
-static int smean(const u8 *p, u32 n) {
+static int smean(const u8 *p, u32 n, int bpp) {  // n pixels
   u32 step = n / 4096, s = 0, c = 0;
-  for (u32 o = step / 2; o < n; o += step) { s += p[o]; c++; }
-  return (int)(s * 10 / c);                  // mean * 10
+  if (bpp == 2) {
+    const u16 *q = (const u16 *)p;
+    for (u32 o = step / 2; o < n; o += step) { s += (q[o] & 1023) >> 2; c++; }
+  } else {
+    for (u32 o = step / 2; o < n; o += step) { s += p[o]; c++; }
+  }
+  return (int)(s * 10 / c);                  // mean * 10 (8-bit scale)
+}
+// the frame into scratch as 8-bit pixels; a 16-bit frame's first row is left out (sensor metadata on some frames)
+static void grab(int i, u32 n) {
+  if (S.sbpp[i] != 2) { memcpy(S.scratch, S.slot[i], n); return; }
+  const u16 *q = (const u16 *)S.slot[i];
+  u32 w = (u32)S.sw[i];
+  for (u32 j = 0; j < w && j < n; j++) S.scratch[j] = 0;
+  for (u32 j = w; j < n; j++) S.scratch[j] = (u8)((q[j] & 1023) >> 2);
 }
 static void put(const char *s, int len) {
   u32 used = S.head - S.tail;
@@ -199,7 +215,7 @@ static void frame(int i, u64 t) {
   predict(c, t);
   S.last_t[c] = t;
   u32 n = (u32)(w * h);
-  int mean = smean(S.slot[i], n);
+  int mean = smean(S.slot[i], n, S.sbpp[i]);
   u32 k = S.k[c]++;
   int a = S.m1[c], b = S.m2[c];
   S.m2[c] = a; S.m1[c] = mean;
@@ -246,6 +262,9 @@ static void frame(int i, u64 t) {
   // the odd place, else a held place, before the cycle test: found late, it names the wrong frame now and then
   int place = oddp >= 0 ? p == oddp : S.phn[c] >= PH_LOCK ? p == S.ph[c] : -1;
   int is_short = strict || (place >= 0 ? place : cyc >= 0 ? cyc : alt && S.nostrict[c] >= 60 && S.nalt[c] * 4 >= S.nostrict[c]);
+  // the Pico 4's cameras alternate two exposures, neither of them short: the darker of each pair has the least room
+  // light around a base station's dot
+  if (S.pairs) is_short = k >= 1 && mean <= a;
   char line[2400]; int L;
   if (!is_short) {
     L = snprintf(line, sizeof line, "F %d %u %llu %d -1\n", c, k, t / 1000, mean);
@@ -253,7 +272,7 @@ static void frame(int i, u64 t) {
     return;
   }
   u64 t0 = now();
-  memcpy(S.scratch, S.slot[i], n);
+  grab(i, n);
   // saturated blobs (base station dots, lamps), then dimmer ones (>= 4x the frame's mean, at least S.thr) in the cells
   // the saturated ones leave alone: a dot that doesn't saturate, in a room light enough to shorten the exposure
   u64 sx[MAXB], sy[MAXB]; u32 np[MAXB]; int pk[MAXB];

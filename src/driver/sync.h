@@ -127,6 +127,14 @@ constexpr double kBrkJumpGap = 0.2;  // s
 double RotorPeriod(int channel);  // s, a 2.0 base station on channel 1..16, else 0
 constexpr double kUpward = 0.1;        // a camera whose axis climbs this much (of 1) looks up: the Frame's upper pair
 
+// The Pico 4's calibration gives the cameras against its IMU, not against the head SteamVR's poses are of, and the
+// headset doesn't store that transform: it's built from the cameras' layout (the two pairs mirror each other across
+// the IMU's y: the left-right axis; they face its -z: forward; the pair looking out sits above the pair looking down:
+// +x is up) with the head between the eyes, eye_depth behind the cameras and level with their middle. Settings
+// (driver_questlhsync): picoPitch (deg, head tilted up against that), picoEyeDepth (m), picoFlip (x is down after all)
+struct PicoHead { double pitch_deg = 0.0, eye_depth = 0.06; bool flip = false; };
+extern PicoHead g_pico_head;
+
 // ---------------------------------------------------------------- optics
 struct CamCal {
   bool valid = false;
@@ -135,6 +143,11 @@ struct CamCal {
   double ir = 1.0;  // near-IR laser image scale about the centre: kIR for the Quest side cameras
   M3 R;  // device <- camera
   V3 t;
+  // kFisheye: Meta's Fisheye62 / the Frame's KB4 (k: radial terms of the angle, p: tangential). kOmni: the Pico's
+  // unified (Mei) model, xi, with radtan distortion (k[0], k[1] radial, p tangential) on the sphere's projection
+  enum Model { kFisheye, kOmni };
+  Model model = kFisheye;
+  double xi = 0;
   double f = 0, fy = 0, cx = 0, cy = 0, k[6] = {}, p[2] = {};
   void Dist(double a, double b, double &u, double &v) const;
   bool Unproject(double px, double py, V3 &d) const;  // unit ray, camera frame
@@ -151,7 +164,7 @@ class Optics {
   bool Used(int cam) const { return cam >= 0 && cam < kMaxCam && cams_[cam].valid && cams_[cam].use; }  // sightings count
   std::string Unused() const;  // "0, 1": the calibrated cameras left out, "" for none
   const std::string &device() const { return device_; }       // "Seacliff" (Quest Pro), "Eureka" (Quest 3), ...
-  enum Headset { kQuest, kFrame, kGalaxyXR };
+  enum Headset { kQuest, kFrame, kGalaxyXR, kPico };
   Headset headset() const { return headset_; }     // whose calibration it is
   bool exact_time() const { return exact_time_; }  // frame times are the frames' own, no poll lag to take off
 
@@ -161,6 +174,7 @@ class Optics {
   Headset headset_ = kQuest;
   bool exact_time_ = false;
   bool LoadFrame(const JVal &root, std::string *err);
+  bool LoadPico(const JVal &root, std::string *err);
 };
 
 // ---------------------------------------------------------------- timing helpers

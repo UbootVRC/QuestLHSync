@@ -69,7 +69,17 @@ static std::string Now() {
 }
 
 // ================================================================ optics
+PicoHead g_pico_head;
+
+// a, b: the direction's x/z and y/z. Out: the distorted normalized image point (pixel = c + f * it)
 void CamCal::Dist(double a, double b, double &u, double &v) const {
+  if (model == kOmni) {  // onto the unit sphere, projected from xi behind its centre, then radtan
+    double n = std::sqrt(a * a + b * b + 1), den = 1 + xi * n, mx = a / den, my = b / den;
+    double r2 = mx * mx + my * my, rad = 1 + r2 * (k[0] + r2 * k[1]);
+    u = mx * rad + 2 * p[0] * mx * my + p[1] * (r2 + 2 * mx * mx);
+    v = my * rad + p[0] * (r2 + 2 * my * my) + 2 * p[1] * mx * my;
+    return;
+  }
   double r = std::hypot(a, b), th = std::atan(r), th2 = th * th;
   double thd = th * (1 + th2 * (k[0] + th2 * (k[1] + th2 * (k[2] + th2 * (k[3] + th2 * (k[4] + th2 * k[5]))))));
   double s = r > 1e-12 ? thd / r : 1.0;
@@ -81,6 +91,36 @@ void CamCal::Dist(double a, double b, double &u, double &v) const {
 // Newton on the forward model
 bool CamCal::Unproject(double px, double py, V3 &d) const {
   double tu = (px - cx) / f, tv = (py - cy) / fy;
+  if (model == kOmni) {  // radtan undone by Newton, then lifted back onto the sphere (Mei)
+    auto rt = [&](double mx, double my, double &u, double &v) {
+      double r2 = mx * mx + my * my, rad = 1 + r2 * (k[0] + r2 * k[1]);
+      u = mx * rad + 2 * p[0] * mx * my + p[1] * (r2 + 2 * mx * mx);
+      v = my * rad + p[0] * (r2 + 2 * my * my) + 2 * p[1] * mx * my;
+    };
+    double mx = tu, my = tv;
+    const double h = 1e-7;
+    for (int i = 0; i < 30; i++) {
+      double u, v, ua, va, ub, vb;
+      rt(mx, my, u, v);
+      rt(mx + h, my, ua, va);
+      rt(mx, my + h, ub, vb);
+      double eu = u - tu, ev = v - tv;
+      if (std::fabs(eu) + std::fabs(ev) < 1e-12) break;
+      double J11 = (ua - u) / h, J21 = (va - v) / h, J12 = (ub - u) / h, J22 = (vb - v) / h;
+      double det = J11 * J22 - J12 * J21;
+      if (!std::isfinite(det) || std::fabs(det) < 1e-12) return false;
+      mx -= (J22 * eu - J12 * ev) / det;
+      my -= (-J21 * eu + J11 * ev) / det;
+    }
+    double r2 = mx * mx + my * my, disc = 1 + (1 - xi * xi) * r2;
+    if (!std::isfinite(disc) || disc < 0) return false;
+    double fac = (xi + std::sqrt(disc)) / (1 + r2);
+    V3 P{fac * mx, fac * my, fac - xi};
+    double n = norm(P);
+    if (!std::isfinite(n) || n <= 0) return false;
+    d = P * (1 / n);
+    return true;
+  }
   double rd = std::hypot(tu, tv), th = std::min(std::max(rd, 0.0), 1.5);
   double s = rd > 1e-12 ? std::tan(th) / rd : 1.0, a = tu * s, b = tv * s;
   const double h = 1e-6;
@@ -106,6 +146,7 @@ bool Optics::Load(const std::string &json, std::string *err) {
   if (!JParse(json, root)) { if (err) *err = "calibration isn't JSON"; return false; }
   const JVal *kind = root.get("kind");
   if (kind && kind->t == JVal::Str && kind->s == "steam_frame") return LoadFrame(root, err);
+  if (kind && kind->t == JVal::Str && kind->s == "pico") return LoadPico(root, err);
   // A separate root key makes older PC drivers reject Galaxy XR profiles
   // instead of silently interpreting [fx,fy,cx,cy] as Meta's [f,cx,cy].
   bool gxr_sensor = kind && kind->t == JVal::Str && kind->s == "galaxy_xr_sensor";
@@ -231,6 +272,70 @@ bool Optics::LoadFrame(const JVal &root, std::string *err) {
   device_ = model && model->t == JVal::Str ? model->s : "Steam Frame";
   headset_ = kFrame;
   exact_time_ = true;
+  return true;
+}
+
+// The Pico 4's lhsyncd sends {"kind": "pico", "device": ..., "cameras": [{"id", "w", "h", "intrinsics": [xi, fu, fv,
+// pu, pv], "distortion": [k1, k2, p1, p2], "T_BS": body (IMU) <- camera, 4x4 row-major}]} from its factory
+// calibration (/mnt/vendor/persist/pvr/mav0/cam<i>/sensor.yaml, Kalibr's omni-radtan). The head <- body transform is
+// built from the cameras' layout (PicoHead in sync.h).
+bool Optics::LoadPico(const JVal &root, std::string *err) {
+  const JVal *cams = root.get("cameras");
+  if (!cams || cams->t != JVal::Arr) { if (err) *err = "not a Pico calibration (no cameras)"; return false; }
+  struct Raw { int id, w, h; std::vector<double> in, dist, T; };
+  std::vector<Raw> raw;
+  for (auto &c : cams->a) {
+    const JVal *id = c.get("id"), *w = c.get("w"), *h = c.get("h"), *in = c.get("intrinsics"), *di = c.get("distortion"),
+               *T = c.get("T_BS");
+    if (!id || !w || !h || !in || !di || !T) continue;
+    Raw r{(int)id->num(-1), (int)w->num(0), (int)h->num(0), in->nums(), di->nums(), T->nums()};
+    if (r.id < 0 || r.id >= kMaxCam || r.w <= 0 || r.h <= 0 || r.in.size() != 5 || r.dist.size() != 4 || r.T.size() != 16)
+      continue;
+    raw.push_back(r);
+  }
+  if (raw.empty()) { if (err) *err = "no usable camera in the Pico calibration"; return false; }
+  // head <- body: body +x up, +y left, -z forward (flipped: +x down, +y right), then the pitch trim about head x
+  const PicoHead &ph = g_pico_head;
+  M3 R0;
+  double s = ph.flip ? -1 : 1;
+  R0.m[0][0] = 0; R0.m[0][1] = -s; R0.m[0][2] = 0;  // head x (right)
+  R0.m[1][0] = s; R0.m[1][1] = 0;  R0.m[1][2] = 0;  // head y (up)
+  R0.m[2][0] = 0; R0.m[2][1] = 0;  R0.m[2][2] = 1;  // head z (back)
+  double a = -ph.pitch_deg * 3.14159265358979323846 / 180, ca = std::cos(a), sa = std::sin(a);
+  M3 Rx;
+  Rx.m[0][0] = 1; Rx.m[0][1] = 0;  Rx.m[0][2] = 0;
+  Rx.m[1][0] = 0; Rx.m[1][1] = ca; Rx.m[1][2] = -sa;
+  Rx.m[2][0] = 0; Rx.m[2][1] = sa; Rx.m[2][2] = ca;
+  M3 Rhb = Rx * R0;
+  // the head's origin in the body frame: the cameras' middle, eye_depth behind them
+  V3 mid{0, 0, 0};
+  for (auto &r : raw) mid = mid + V3{r.T[3], r.T[7], r.T[11]} * (1.0 / raw.size());
+  V3 ob = mid + T(R0) * V3{0, 0, ph.eye_depth};
+  CamCal out[kMaxCam];
+  int n = 0;
+  for (auto &r : raw) {
+    CamCal &k = out[r.id];
+    M3 Rbc;
+    for (int i = 0; i < 3; i++)
+      for (int j = 0; j < 3; j++) Rbc.m[i][j] = r.T[i * 4 + j];
+    V3 tbc{r.T[3], r.T[7], r.T[11]};
+    k.model = CamCal::kOmni;
+    k.w = r.w; k.h = r.h;
+    k.xi = r.in[0]; k.f = r.in[1]; k.fy = r.in[2]; k.cx = r.in[3]; k.cy = r.in[4];
+    k.k[0] = r.dist[0]; k.k[1] = r.dist[1]; k.p[0] = r.dist[2]; k.p[1] = r.dist[3];
+    bool finite = std::isfinite(k.xi + k.f + k.fy + k.cx + k.cy + k.k[0] + k.k[1] + k.p[0] + k.p[1]) && k.f > 0 && k.fy > 0;
+    if (!finite) { k = CamCal(); continue; }
+    k.R = Rhb * Rbc;
+    k.t = Rhb * (tbc - ob);
+    k.valid = true;
+    n++;
+  }
+  if (!n) { if (err) *err = "no usable camera in the Pico calibration"; return false; }
+  for (int i = 0; i < kMaxCam; i++) cams_[i] = out[i];
+  const JVal *dev = root.get("device");
+  device_ = dev && dev->t == JVal::Str && !dev->s.empty() ? dev->s : "Pico";
+  headset_ = kPico;
+  exact_time_ = false;
   return true;
 }
 

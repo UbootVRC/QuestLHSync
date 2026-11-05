@@ -70,6 +70,7 @@ std::string QuestFamily(const std::string &text) {
   if (has("questpro") || has("seacliff")) return "Quest Pro";
   if (has("quest3") || has("eureka") || has("panther")) return "Quest 3";
   if (has("steamframe") || has("deckard")) return "Steam Frame";
+  if (has("pico4") || has("picoa8110") || has("a8110") || has("phoenix")) return "Pico 4";
   return "";
 }
 

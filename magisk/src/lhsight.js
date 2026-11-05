@@ -7,11 +7,14 @@ var MAX_MS = parseInt("@DUR@");
 // scan 1: read this one. lhsyncd picks the side cameras (OV7251, 640x480): on the Quest Pro the front pair (OG01A,
 // 1280x1024) never caught a base station, only other lights, and cost three quarters of the scan time. The Quest 3
 // has the same four sensors. Left unfilled (a hand run): the Quest Pro's.
+// Optional fields after scan: bytes per pixel (2: 16-bit words, the Pico 4) and the buffer's size in bytes.
 var CAMS_SPEC = "@CAMS@";
+// 1: the darker frame of each pair is scanned (the Pico 4, whose cameras alternate two exposures)
+var PAIRS = parseInt("@PAIRS@", 10) === 1 ? 1 : 0;
 var CAMS = (CAMS_SPEC.charAt(0) === "@" ? "0:1280:1024:0,1:1280:1024:0,2:640:480:1,3:640:480:1" : CAMS_SPEC)
   .split(",").filter(function (e) { return e.length; }).map(function (e) {
     var f = e.split(":").map(function (v) { return parseInt(v, 10); });
-    return { id: f[0], w: f[1], h: f[2], scan: f[3] === 1 };
+    return { id: f[0], w: f[1], h: f[2], scan: f[3] === 1, bpp: f[4] === 2 ? 2 : 1, size: f[5] > 0 ? f[5] : 0 };
   }).filter(function (c) { return c.id >= 0 && c.id < 16 && c.w > 0 && c.h > 0; });
 var SCAN = CAMS.filter(function (c) { return c.scan; });
 var MAXW = Math.max.apply(null, SCAN.map(function (c) { return c.w; }).concat([16]));
@@ -26,7 +29,8 @@ var clock_gettime = new NativeFunction(g("clock_gettime"), "int", ["int", "point
 var stateBuf = Memory.alloc(16384);
 var cm = new CModule(`@CSRC@`, { clock_gettime: g("clock_gettime"), memcpy: g("memcpy"), snprintf: g("snprintf"), S: stateBuf });
 var F = function (n, r, a) { return new NativeFunction(cm[n], r, a); };
-var add_slot = F("add_slot", "void", ["pointer", "int", "int", "int"]);
+var add_slot = F("add_slot", "void", ["pointer", "int", "int", "int", "int"]);
+var set_pairs = F("set_pairs", "void", ["int"]);
 var set_bufs = F("set_bufs", "void", ["pointer", "pointer", "pointer", "pointer", "int"]);
 var prime = F("prime", "void", []), poll = F("poll", "int", []), reset_slots = F("reset_slots", "void", []);
 var drain = F("drain", "int", ["pointer", "int"]);
@@ -36,16 +40,18 @@ var scratchBuf = Memory.alloc(MAXW * MAXH), cellBuf = Memory.alloc((MAXW >> 4) *
 var labBuf = Memory.alloc((MAXW >> 4) * (MAXH >> 4) * 4);
 var outBuf = Memory.alloc(1 << 20), drainBuf = Memory.alloc(1 << 16), tsBuf = Memory.alloc(16);
 set_bufs(scratchBuf, cellBuf, labBuf, outBuf, 64);
+set_pairs(PAIRS);
 var PAGE = 4096;
-function bufSize(c) { return Math.ceil(c.w * c.h / PAGE) * PAGE; }  // one 8-bit frame, whole pages
+function bufSize(c) { return c.size || Math.ceil(c.w * c.h * c.bpp / PAGE) * PAGE; }  // one frame, whole pages
 function discover() {
   reset_slots();
   var fp = fopen(Memory.allocUtf8String("/proc/self/maps"), Memory.allocUtf8String("r")), buf = Memory.alloc(512), all = [];
   while (!fgets(buf, 512, fp).isNull()) {
-    var m = /^([0-9a-f]+)-([0-9a-f]+)\s+rw-s.*\/dmabuf(?::dmabuf(\d+))?/.exec(buf.readCString());
+    // "/dmabuf:dmabuf12" (Quest), "anon_inode:dmabuf12" (Pico 4)
+    var m = /^([0-9a-f]+)-([0-9a-f]+)\s+rw-s.*(?:\/dmabuf(?::dmabuf(\d+))?|anon_inode:dmabuf(\d+))/.exec(buf.readCString());
     if (!m) continue;
-    var a = parseInt(m[1], 16), b = parseInt(m[2], 16);
-    all.push({ a: a, size: b - a, id: m[3] === undefined ? -1 : parseInt(m[3], 10) });
+    var a = parseInt(m[1], 16), b = parseInt(m[2], 16), id = m[3] !== undefined ? m[3] : m[4];
+    all.push({ a: a, size: b - a, id: id === undefined ? -1 : parseInt(id, 10) });
   }
   fclose(fp);
   // Each camera has a ring of frame buffers. The HAL allocates the rings in turn, lowest camera id first: the dmabuf
@@ -71,7 +77,7 @@ function discover() {
     }
     regs.forEach(function (r, k) {
       var c = cams[Math.floor(k / per)];
-      if (c.scan) { add_slot(ptr(r.a), c.w, c.h, c.id); n++; }
+      if (c.scan) { add_slot(ptr(r.a), c.w, c.h, c.id, c.bpp); n++; }
     });
     cams.forEach(function (c) { if (c.scan) got.push(c.id + ":" + per); });
   });
@@ -96,12 +102,24 @@ function flush() {
   var cut = pending.lastIndexOf("\n");
   if (cut >= 0) { console.log(pending.slice(0, cut)); pending = pending.slice(cut + 1); }
 }
-console.log("I slots " + discover() + " max_ms " + MAX_MS);
-var t0 = Date.now(), lastBeat = 0, faults = 0;
+var slots = discover();
+console.log("I slots " + slots + " max_ms " + MAX_MS);
+var t0 = Date.now(), lastBeat = 0, faults = 0, lastFrame = Date.now(), lastLook = Date.now();
+// The Pico 4 frees its camera rings while it doesn't track (taken off, asleep) and allocates new ones when it does
+// again: with no slots, or no frame for a while, look again every few seconds
+var RELOOK_MS = 3000;
 function step() {
   var budget = Date.now() + 20;
   while (Date.now() < budget) {
-    try { poll(); } catch (e) { faults++; usleep(200000); console.log("W fault " + e.message + " -> " + discover() + " slots"); }
+    try { if (poll() > 0) lastFrame = Date.now(); }
+    catch (e) { faults++; usleep(200000); slots = discover(); lastFrame = lastLook = Date.now(); console.log("W fault " + e.message + " -> " + slots + " slots"); }
+    var now = Date.now();
+    if (PAIRS && now - lastLook > RELOOK_MS && (slots === 0 || now - lastFrame > RELOOK_MS)) {
+      lastLook = now;
+      var was = slots;
+      slots = discover();
+      if (slots !== was) console.log("I cameras looked for again: " + slots + " slots");
+    }
     usleep(Math.max(1000, idle_us()));
   }
   flush();

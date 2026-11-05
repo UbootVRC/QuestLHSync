@@ -292,7 +292,7 @@ static std::string GetStr(vr::PropertyContainerHandle_t c, vr::ETrackedDevicePro
 static std::string StreamerName(const std::string &driver) {
   static const char *const names[][2] = {{"oculus_virtualdesktop", "Virtual Desktop"}, {"oculus", "Quest Link"},
                                          {"creolecast", "CreoleCast"}, {"vrlink", "Steam Link"},
-                                         {"alvr_server", "ALVR"}};
+                                         {"alvr_server", "ALVR"}, {"pico", "Pico Connect"}};
   for (auto &n : names)
     if (driver == n[0]) return n[1];
   return driver;
@@ -418,13 +418,13 @@ class Provider : public vr::IServerTrackedDeviceProvider {
           hmd_system_ = StreamerName(sys);
           g_sync->SetStreamer(sys);
           Log(Fmt("HMD %u: %s via %s%s", i, hmd_model_.c_str(), hmd_system_.c_str(), !family.empty() || !any_hmd_ ? "" :
-                  " - not named a Quest Pro, 3, 3S or Steam Frame, used because anyHmd is set"));
+                  " - not named a Quest Pro, 3, 3S, Steam Frame or Pico 4, used because anyHmd is set"));
           continue;
         }
         std::lock_guard<std::mutex> g(hmd_m_);
         hmd_model_ = model.empty() ? "headset" : model;
         hmd_system_ = StreamerName(sys);
-        Log(Fmt("HMD %u: %s via %s isn't a Quest Pro, 3, 3S or Steam Frame: idle", i, hmd_model_.c_str(),
+        Log(Fmt("HMD %u: %s via %s isn't a Quest Pro, 3, 3S, Steam Frame or Pico 4: idle", i, hmd_model_.c_str(),
                 hmd_system_.c_str()));
       }
       g_kind[i] = kOther;
@@ -512,6 +512,13 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     g_rel->SetEnabled(steady_);
     bool rec = s->GetBool(kSection, "record", &e);
     SetRecording(e == vr::VRSettingsError_None && rec);
+    // the Pico 4's head <- IMU transform (sync.h PicoHead): read when its calibration comes in
+    float pitch = s->GetFloat(kSection, "picoPitch", &e);
+    g_pico_head.pitch_deg = e == vr::VRSettingsError_None ? pitch : 0.0;
+    float depth = s->GetFloat(kSection, "picoEyeDepth", &e);
+    g_pico_head.eye_depth = e == vr::VRSettingsError_None ? depth : 0.06;
+    bool flip = s->GetBool(kSection, "picoFlip", &e);
+    g_pico_head.flip = e == vr::VRSettingsError_None && flip;
   }
 
   void SetRecording(bool on) {
