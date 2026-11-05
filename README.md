@@ -1,5 +1,108 @@
 # QuestLHSync
 
+> **This fork adds Pico 4 support (test build).** It's an unofficial port of
+> [CreoleVR/QuestLHSync](https://github.com/CreoleVR/QuestLHSync), not made or
+> supported by CreoleVR; see [Pico 4 (test build)](#pico-4-test-build) below.
+> Everything after that section is the original README.
+
+## Pico 4 (test build)
+
+The headset part reads the Pico 4's tracking cameras inside its tracking
+service (`pvrtrackingservice`) and uses the headset's own factory camera
+calibration. The PC driver gains the Pico's camera model. Downloads are in
+[Releases](https://github.com/UbootVRC/QuestLHSync/releases).
+
+**Tested so far:** one Pico 4 (A8110, PUI 5.13.7, Magisk) streamed with Pico
+Connect and four 2.0 base stations. It locked within about a minute and levelled
+with the base stations within 0.3°. **Not tested yet:** other firmware, the Pico
+4 Pro / Ultra / Neo 3, Virtual Desktop or ALVR, long sessions, and reboots or
+sleep and wake with the module installed. Please report how it goes.
+
+### Requirements
+
+- A **Pico 4**, rooted with [Magisk](https://github.com/topjohnwu/Magisk).
+- **SteamVR base stations**, with at least one lighthouse tracker or Index
+  controller switched on.
+- **Windows with SteamVR**, the Pico streamed with **Pico Connect** (others may
+  work with `"anyHmd": true`, below).
+- The PC and the Pico on the **same local network**.
+
+### Install
+
+1. **Remove the official QuestLHSync driver if you have it.** Two drivers named
+   `questlhsync` conflict, and the official installer downloads CreoleVR's
+   release, which has no Pico support. With SteamVR closed, click
+   **Uninstall** in the official installer, or `vrpathreg removedriver` its folder.
+2. **Headset:** install `QuestLHSync-pico-module-<version>.zip` in the Magisk app
+   (**Modules > Install from storage**) and reboot. Or over adb:
+
+   ```
+   adb push QuestLHSync-pico-module-<version>.zip /sdcard/Download/
+   adb shell su -c "magisk --install-module /sdcard/Download/QuestLHSync-pico-module-<version>.zip"
+   adb reboot
+   ```
+
+3. **PC:** extract the `questlhsync` folder from
+   `QuestLHSync-steamvr-pico-<version>.zip` somewhere permanent and, with SteamVR
+   closed, register it:
+
+   ```
+   "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" adddriver "C:\path\to\questlhsync"
+   ```
+
+4. Turn off SpaceCalibrator, OpenVR-SpaceOverride or anything else that moves
+   lighthouse devices (SteamVR **Settings > Startup / Shutdown > Manage
+   Add-ons**).
+
+Then use it as described in [Use](#use) below: start SteamVR, connect the Pico
+with Pico Connect, switch on a tracker or controller and look around so the
+cameras see each base station.
+
+### Settings for the Pico
+
+The Pico doesn't store where its cameras sit relative to your eyes, so the
+driver works it out from the camera layout. If lighthouse devices sit
+consistently a little off, these keys in `steamvr.vrsettings` under
+`"driver_questlhsync"` adjust it:
+
+| Key | Default | |
+|---|---|---|
+| `picoPitch` | `0` | Degrees: tilts the assumed head frame up (+) or down (-) |
+| `picoEyeDepth` | `0.06` | Metres from the cameras back to between your eyes |
+| `picoFlip` | `false` | `true` turns the assumed up direction upside down (only if nothing ever locks) |
+
+### Known issues
+
+- Reading the cameras costs about half of one CPU core on the headset. Report
+  heat, battery drain or stutter.
+- The headset part answers anyone on the local network, as on the Quest.
+
+### Reporting
+
+Please open an [issue](https://github.com/UbootVRC/QuestLHSync/issues) with:
+
+- `%LOCALAPPDATA%\QuestLHSync\questlhsync.log` from the PC;
+- the headset's log: `adb shell su -c cat /dev/.questlhsync/lhsyncd.log`;
+- optionally a recording (the dashboard's **Record session** button).
+
+The logs contain your headset's serial number (the headset's log), its model and
+firmware, and your local IP addresses: look them over before posting, and blank
+out the serial if you like.
+
+### Uninstall
+
+- **Headset:** remove "QuestLHSync (Pico 4)" in the Magisk app and reboot.
+- **PC:** with SteamVR closed, `vrpathreg removedriver "C:\path\to\questlhsync"`
+  and delete `%LOCALAPPDATA%\QuestLHSync`.
+
+### Building
+
+As below, plus `python pico\build_module.py` for the Pico module (needs
+[Zig](https://ziglang.org): `zig` on PATH or `ZIG` set to it; no Android NDK) and
+`python pico\release_pico.py` for the two release files.
+
+---
+
 Lighthouse trackers, controllers and base stations aligned to a Quest's or a
 Steam Frame's own tracking, with nothing mounted on the headset. The headset's
 tracking cameras see the laser flashes of SteamVR base stations, and
