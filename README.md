@@ -12,11 +12,23 @@ service (`pvrtrackingservice`) and uses the headset's own factory camera
 calibration. The PC driver gains the Pico's camera model. Downloads are in
 [Releases](https://github.com/UbootVRC/QuestLHSync/releases).
 
-**Tested so far:** one Pico 4 (A8110, PUI 5.13.7, Magisk) streamed with Pico
-Connect and four 2.0 base stations. It locked within about a minute and levelled
-with the base stations within 0.3°. **Not tested yet:** other firmware, the Pico
-4 Pro / Ultra / Neo 3, Virtual Desktop or ALVR, long sessions, and reboots or
-sleep and wake with the module installed. Please report how it goes.
+**Tested so far:** two Pico 4s (A8110, PUI 5.13.3 and 5.13.7, Magisk), one sold as
+a Pico 4 Pro and one as a Pico 4 Enterprise, streamed with Pico Connect (and one
+with Virtual Desktop) and four 2.0 base stations. On one it locked within about a
+minute and levelled with the base stations within 0.3°; the other took longer to
+line up all four. Sleep and wake with the module installed recovers by itself
+(test build 2). **Not tested yet:** the Pico 4 Ultra / Neo 3, ALVR, and long
+sessions. Please report how it goes.
+
+The first time, give it a few minutes and look around at each base station,
+turning your head side to side: it's still learning how your streamer times the
+headset's poses, and where the base stations are. It saves both, so the next
+session starts from them.
+
+**Test build 2:** fixes the cameras getting mixed up when the headset wakes from
+sleep (it could grab the camera buffers while the Pico was still setting them up),
+and stops the headset's log from repeating the same warning every few seconds
+while it sleeps.
 
 ### Requirements
 

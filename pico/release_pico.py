@@ -1,7 +1,7 @@
-"""Packs the Pico 4 test release into out/release-<version>-pico/ from what build.bat and pico/build_module.py built:
+"""Packs the Pico 4 test release into out/release-<version>-pico<build>/ from what build.bat and pico/build_module.py built:
 
-  QuestLHSync-pico-module-<version>.zip    the Pico 4's Magisk module
-  QuestLHSync-steamvr-pico-<version>.zip   the SteamVR driver folder questlhsync/ with Pico 4 support (register it by
+  QuestLHSync-pico-module-<version>-pico<build>.zip    the Pico 4's Magisk module
+  QuestLHSync-steamvr-pico-<version>-pico<build>.zip   the SteamVR driver folder questlhsync/ with Pico 4 support (register it by
                                            hand: the official installer downloads CreoleVR's release, without it)
 
 Each package carries LICENSE and THIRD_PARTY_NOTICES.md, as the official ones do. Refuses when a build is older than
@@ -16,8 +16,10 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "magisk"))
 import release  # noqa: E402  (steamvr_zip, module_zip, newest)
+sys.path.insert(0, HERE)
+from pico_version import PICO_BUILD  # noqa: E402
 
-VER = release.VERSION.lstrip("v")
+VER = f"{release.VERSION.lstrip('v')}-pico{PICO_BUILD}"  # 1.28-pico2
 PICO_MODULE = os.path.join(ROOT, "out", f"QuestLHSync-pico-module-{VER}.zip")
 
 
@@ -34,7 +36,7 @@ def main():
     for path, src, how in checks:
         if not os.path.exists(path) or os.path.getmtime(path) < src:
             sys.exit(f"{os.path.relpath(path, ROOT)} is missing or older than its sources: run {how}")
-    dest = os.path.join(ROOT, "out", f"release-{VER}-pico")
+    dest = os.path.join(ROOT, "out", f"release-{VER}")
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest)
     release.MODULE = PICO_MODULE

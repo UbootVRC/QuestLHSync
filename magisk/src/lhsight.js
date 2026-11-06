@@ -43,17 +43,43 @@ set_bufs(scratchBuf, cellBuf, labBuf, outBuf, 64);
 set_pairs(PAIRS);
 var PAGE = 4096;
 function bufSize(c) { return c.size || Math.ceil(c.w * c.h * c.bpp / PAGE) * PAGE; }  // one frame, whole pages
-function discover() {
-  reset_slots();
-  var fp = fopen(Memory.allocUtf8String("/proc/self/maps"), Memory.allocUtf8String("r")), buf = Memory.alloc(512), all = [];
-  while (!fgets(buf, 512, fp).isNull()) {
+var mapsBuf = Memory.alloc(512);
+function readMaps() {  // the shared buffers this process has mapped
+  var fp = fopen(Memory.allocUtf8String("/proc/self/maps"), Memory.allocUtf8String("r")), all = [];
+  while (!fgets(mapsBuf, 512, fp).isNull()) {
     // "/dmabuf:dmabuf12" (Quest), "anon_inode:dmabuf12" (Pico 4)
-    var m = /^([0-9a-f]+)-([0-9a-f]+)\s+rw-s.*(?:\/dmabuf(?::dmabuf(\d+))?|anon_inode:dmabuf(\d+))/.exec(buf.readCString());
+    var m = /^([0-9a-f]+)-([0-9a-f]+)\s+rw-s.*(?:\/dmabuf(?::dmabuf(\d+))?|anon_inode:dmabuf(\d+))/.exec(mapsBuf.readCString());
     if (!m) continue;
     var a = parseInt(m[1], 16), b = parseInt(m[2], 16), id = m[3] !== undefined ? m[3] : m[4];
     all.push({ a: a, size: b - a, id: id === undefined ? -1 : parseInt(id, 10) });
   }
   fclose(fp);
+  return all;
+}
+// The Pico 4 frees its camera rings while it doesn't track and allocates new ones, buffer by buffer, when it does again.
+// Rings caught half allocated would hand cameras each other's buffers (6 of 8 each: the first camera takes some of the
+// second's), so in PAIRS mode a search counts only when two looks a quarter second apart agree, and a ring never has
+// fewer buffers than it had before. Its warnings are logged only when they change (it looks every few seconds).
+var knownPer = {}, lastReport = "";
+function same(x, y) {
+  if (x.length !== y.length) return false;
+  for (var i = 0; i < x.length; i++) if (x[i].a !== y[i].a || x[i].id !== y[i].id) return false;
+  return true;
+}
+function discover() {
+  reset_slots();
+  var all = readMaps(), lines = [];
+  var say = function (l) { if (PAIRS) lines.push(l); else console.log(l); };
+  if (PAIRS) {
+    usleep(250000);
+    var again = readMaps();
+    if (!same(all, again)) {
+      say("W camera buffers still changing (" + all.length + " -> " + again.length + " mapped): looking again shortly");
+      report(lines);
+      prime();
+      return 0;
+    }
+  }
   // Each camera has a ring of frame buffers. The HAL allocates the rings in turn, lowest camera id first: the dmabuf
   // names count up in that order. Their addresses usually run the other way, but not always (one Quest Pro boot had
   // two of camera 2's buffers mapped above the front cameras'), so addresses are only the fallback. Cameras of the
@@ -65,14 +91,19 @@ function discover() {
     var regs = all.filter(function (r) { return r.size === +sz; });
     var ids = cams.map(function (c) { return c.id; }).join("+");
     if (!regs.length || regs.length % cams.length) {
-      console.log("W cameras " + ids + " (" + cams[0].w + "x" + cams[0].h + "): " + regs.length + " buffers, not " +
-                  cams.length + " equal rings");
+      say("W cameras " + ids + " (" + cams[0].w + "x" + cams[0].h + "): " + regs.length + " buffers, not " +
+          cams.length + " equal rings");
       return;
     }
     var per = regs.length / cams.length, byName = regs.every(function (r) { return r.id >= 0; });
+    if (PAIRS && knownPer[sz] && per < knownPer[sz]) {
+      say("W cameras " + ids + ": " + per + " buffers each, " + knownPer[sz] + " before: still being allocated");
+      return;
+    }
+    if (PAIRS) knownPer[sz] = Math.max(knownPer[sz] || 0, per);
     if (byName) regs.sort(function (x, y) { return x.id - y.id; });
     else {
-      console.log("W cameras " + ids + ": buffers not named in allocation order, mapping them by address");
+      say("W cameras " + ids + ": buffers not named in allocation order, mapping them by address");
       regs.sort(function (x, y) { return y.a - x.a; });
     }
     regs.forEach(function (r, k) {
@@ -84,12 +115,18 @@ function discover() {
   if (!n) {  // what the HAL has instead: what a new headset or OS build needs looked at
     var hist = {};
     all.forEach(function (r) { hist[r.size] = (hist[r.size] || 0) + 1; });
-    console.log("W no camera buffers found; dmabuf sizes here: " + (Object.keys(hist).map(function (s) {
+    say("W no camera buffers found; dmabuf sizes here: " + (Object.keys(hist).map(function (s) {
       return "0x" + (+s).toString(16) + "x" + hist[s];
     }).join(" ") || "none"));
-  } else console.log("I cameras " + got.join(" "));
+  } else say("I cameras " + got.join(" "));
+  report(lines);
   prime();
   return n;
+}
+function report(lines) {  // PAIRS mode: a search's lines, only when they differ from the last search's
+  var r = lines.join("\n");
+  if (r && r !== lastReport) console.log(r);
+  lastReport = r;
 }
 function mono_us() { clock_gettime(1, tsBuf); return tsBuf.readS64().toNumber() * 1e6 + Math.floor(tsBuf.add(8).readS64().toNumber() / 1000); }
 var pending = "";
