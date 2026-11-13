@@ -25,6 +25,11 @@ turning your head side to side: it's still learning how your streamer times the
 headset's poses, and where the base stations are. It saves both, so the next
 session starts from them.
 
+**Test build 3:** fixes controller button clicks (such as the Pico controller's
+menu button) not reaching SteamVR while QuestLHSync is loaded. The fix is
+Ryan6-VRC's, from [CreoleVR/QuestLHSync#67](https://github.com/CreoleVR/QuestLHSync/pull/67),
+and only the SteamVR driver changed: the Pico module is the same as test build 2.
+
 **Test build 2:** fixes the cameras getting mixed up when the headset wakes from
 sleep (it could grab the camera buffers while the Pico was still setting them up),
 and stops the headset's log from repeating the same warning every few seconds
